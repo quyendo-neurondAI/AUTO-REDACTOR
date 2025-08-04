@@ -5,6 +5,7 @@ from typing import List, Optional
 from presidio_analyzer import EntityRecognizer, RecognizerResult, AnalyzerEngine
 from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
 from pathlib import Path
+import torch 
 
 ENTITIES_LIST = [
     'PASSWORD', 'ZIPCODE', 'AMBIGUOUS', 'BUILDINGNUM', 'CREDITCARDNUMBER',
@@ -18,8 +19,9 @@ class HuggingFacePIIRecognizer(EntityRecognizer):
         super().__init__(supported_entities=normalized_entities)
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = AutoModelForTokenClassification.from_pretrained(
-            model_path, device_map="cpu", local_files_only=True
+            model_path, device_map=device, local_files_only=True
         )
         self.nlp_pipeline = pipeline(
             "token-classification", model=self.model, tokenizer=self.tokenizer, aggregation_strategy="simple"

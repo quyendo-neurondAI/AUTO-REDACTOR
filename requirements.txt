@@ -8,6 +8,8 @@ protobuf
 python-doctr
 Levenshtein
 accelerate
+matplotlib>=3.5.0
+ultralytics>=8.0.0
 
 # Audio redaction dependencies
 faster-whisper>=1.0.0

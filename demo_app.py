@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 # Video redaction imports
 from video_redactor.recognizer import build_analyzer
 from video_redactor.redactor import redact_video
+from video_redactor.object_detector import ObjectDetector
 from doctr.models import ocr_predictor
 
 # Audio redaction imports
@@ -92,12 +93,23 @@ if ffmpeg_path:
 @st.cache_resource
 def load_ocr_model():
     st.info("🔄 Loading OCR model...")
-    return ocr_predictor(pretrained=True)
+    return ocr_predictor(pretrained=True).to('cuda')
 
 @st.cache_resource
 def load_analyzer():
     st.info("🔄 Building PII analyzer...")
     return build_analyzer()
+
+@st.cache_resource
+def load_object_detector():
+    """Load and cache YOLOv8 object detector"""
+    try:
+        st.info("🔄 Loading YOLOv8 object detector...")
+        detector = ObjectDetector()
+        return detector
+    except Exception as e:
+        st.error(f"Error loading YOLOv8 model: {e}")
+        return None
 
 @st.cache_resource
 def load_whisper_model(model_size):
@@ -203,13 +215,14 @@ def format_transcript_output(segments, info, audio_filename, model_size):
 
 # -- STREAMLIT UI SETUP --
 st.set_page_config(page_title="Multimedia Redactor Demo", layout="wide")
-st.title("🔐 Multimedia Redactor with OCR + PII Detection")
+st.title("🔐 Multimedia Redactor with Computer Vision + PII Detection")
 st.markdown("Upload video or audio files to detect and redact sensitive PII using OCR, NLP, and AI transcription.")
 
 # -- LOAD MODELS ON STARTUP --
 with st.spinner("🔍 Initializing models..."):
     analyzer = load_analyzer()
     ocr_model = load_ocr_model()
+    object_detector = load_object_detector()
 
 # Inject ocr_model into the redactor module (used as a global)
 import video_redactor.redactor as redactor_module_redactor
@@ -229,6 +242,74 @@ processing_mode = st.sidebar.selectbox(
     ],
     help="Choose what type of processing to perform"
 )
+
+# Video redaction settings (shown for video-related modes)
+if processing_mode in ["Video Redaction Only", "Video + Audio Redaction"]:
+    st.sidebar.subheader("Video Settings")
+    
+    # Text redaction options
+    enable_text_redaction = st.sidebar.checkbox(
+        "Enable Text Redaction (OCR + PII)",
+        value=True,
+        help="Detect and redact sensitive text in video"
+    )
+    
+    # Object detection options
+    enable_object_detection = st.sidebar.checkbox(
+        "Enable Object Filtering",
+        value=False,
+        help="Detect and blur objects in video"
+    )
+    
+    if enable_object_detection:
+        # Object detection settings
+        st.sidebar.subheader("Object Filtering Settings")
+        
+        # Object classes selection
+        if object_detector:
+            available_classes = object_detector.get_available_classes()
+            
+            # Common classes for quick selection
+            common_classes = ["person", "car", "phone", "laptop", "chair", "book", "cup", "bottle"]
+            
+            # Create a multiselect for common classes
+            selected_common_classes = st.sidebar.multiselect(
+                "Common Object Classes",
+                common_classes,
+                default=["person"],
+                help="Select common object classes to blur"
+            )
+            
+            # Allow custom class input
+
+            
+            # Combine selected classes
+            object_classes = selected_common_classes.copy()
+
+            # Show available classes info
+            if st.sidebar.button("📋 Show All Available Classes"):
+                st.sidebar.write("**Available Object Classes:**")
+                for i, class_name in enumerate(available_classes, 1):
+                    st.sidebar.write(f"{i:3d}. {class_name}")
+        
+        # Object detection parameters
+        object_confidence = st.sidebar.slider(
+            "Detection Confidence",
+            min_value=0.1,
+            max_value=1.0,
+            value=0.5,
+            step=0.1,
+            help="Higher values = more accurate but fewer detections"
+        )
+        
+        blur_strength = st.sidebar.slider(
+            "Blur Strength",
+            min_value=1,
+            max_value=49,
+            value=15,
+            step=2,
+            help="Higher values = stronger blur effect"
+        )
 
 # Audio model settings (shown for audio-related modes)
 if processing_mode in ["Audio Redaction Only", "Video + Audio Redaction", "Audio Transcription Only"]:
@@ -311,11 +392,50 @@ if uploaded_file:
                 output_video_path = tmp_output.name
 
             try:
-                redact_video(input_file_path, output_video_path, analyzer)
+                # Prepare object detection parameters
+                object_detector_param = None
+                object_classes_param = None
+                object_confidence_param = 0.5
+                blur_strength_param = 15
+                
+                if enable_object_detection and object_detector:
+                    object_detector_param = object_detector
+                    object_classes_param = object_classes if 'object_classes' in locals() else None
+                    object_confidence_param = object_confidence if 'object_confidence' in locals() else 0.5
+                    blur_strength_param = blur_strength if 'blur_strength' in locals() else 15
+                
+                redact_video(
+                    input_file_path, 
+                    output_video_path, 
+                    analyzer,
+                    object_detector=object_detector_param,
+                    object_classes=object_classes_param,
+                    object_confidence=object_confidence_param,
+                    blur_strength=blur_strength_param,
+                    enable_text_redaction=enable_text_redaction,
+                    enable_object_redaction=enable_object_detection
+                )
 
                 with open(output_video_path, "rb") as f:
                     video_data = f.read()
                     st.success("✅ Video redaction complete!")
+                    
+                    # Show processing summary
+                    processing_summary = []
+                    if enable_text_redaction:
+                        processing_summary.append("✅ Text redaction (OCR + PII)")
+                    if enable_object_detection:
+                        processing_summary.append("✅ Object detection (YOLOv8)")
+                        if object_classes_param:
+                            processing_summary.append(f"   - Classes: {', '.join(object_classes_param)}")
+                            processing_summary.append(f"   - Confidence: {object_confidence_param}")
+                            processing_summary.append(f"   - Blur strength: {blur_strength_param}")
+                    
+                    if processing_summary:
+                        st.info("Processing Summary:")
+                        for item in processing_summary:
+                            st.write(f"   {item}")
+                    
                     st.download_button(
                         "📥 Download Redacted Video",
                         video_data,
@@ -434,7 +554,29 @@ if uploaded_file:
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_video:
                         temp_video_path = tmp_video.name
 
-                    redact_video(input_file_path, temp_video_path, analyzer)
+                    # Prepare object detection parameters
+                    object_detector_param = None
+                    object_classes_param = None
+                    object_confidence_param = 0.5
+                    blur_strength_param = 15
+                    
+                    if enable_object_detection and object_detector:
+                        object_detector_param = object_detector
+                        object_classes_param = object_classes if 'object_classes' in locals() else None
+                        object_confidence_param = object_confidence if 'object_confidence' in locals() else 0.5
+                        blur_strength_param = blur_strength if 'blur_strength' in locals() else 15
+
+                    redact_video(
+                        input_file_path, 
+                        temp_video_path, 
+                        analyzer,
+                        object_detector=object_detector_param,
+                        object_classes=object_classes_param,
+                        object_confidence=object_confidence_param,
+                        blur_strength=blur_strength_param,
+                        enable_text_redaction=enable_text_redaction,
+                        enable_object_redaction=enable_object_detection
+                    )
 
                     # Step 3: Transcribe audio
                     st.info("Step 3/5: Transcribing audio...")
@@ -570,4 +712,4 @@ if uploaded_file:
 
 # -- FOOTER --
 st.markdown("---")
-st.markdown("Built with ❤️ using Streamlit, OpenCV, Presidio, Faster-Whisper, Google Gemini AI, and FFmpeg")
+st.markdown("Built with ❤️ using Streamlit, OpenCV, Presidio, Faster-Whisper, Google Gemini AI, YOLOv8, and FFmpeg")
